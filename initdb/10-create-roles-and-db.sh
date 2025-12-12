@@ -5,13 +5,10 @@ DB_NAME="$(cat /run/secrets/db_name)"
 RAILS_PASS="$(cat /run/secrets/rails_app_password)"
 SUPERSET_PASS="$(cat /run/secrets/superset_password)"
 
-# Always connect to the built-in 'postgres' DB (exists in every cluster)
-psql -v ON_ERROR_STOP=1 --username "postgres" --dbname "postgres" \
-  -v db_name="${DB_NAME}" \
-  -v rails_pass="${RAILS_PASS}" \
-  -v superset_pass="${SUPERSET_PASS}" <<'SQL'
+# Connect to the built-in 'postgres' DB
+psql -v ON_ERROR_STOP=1 --username "postgres" --dbname "postgres" <<SQL
 -- Create roles if missing (idempotent)
-DO $$
+DO \$\$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rails_app') THEN
     CREATE ROLE rails_app LOGIN;
@@ -20,36 +17,33 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'superset') THEN
     CREATE ROLE superset LOGIN;
   END IF;
-END $$;
+END \$\$;
 
--- Set/rotate passwords (safe to re-run)
-ALTER ROLE rails_app PASSWORD :'rails_pass';
-ALTER ROLE superset  PASSWORD :'superset_pass';
+-- Set/rotate passwords
+ALTER ROLE rails_app PASSWORD '${RAILS_PASS}';
+ALTER ROLE superset  PASSWORD '${SUPERSET_PASS}';
 
 -- Harden roles (non-superuser)
 ALTER ROLE rails_app NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT;
 ALTER ROLE superset  NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT;
 
 -- Create database if missing; ensure rails_app is owner
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = :'db_name') THEN
-    EXECUTE format('CREATE DATABASE %I OWNER rails_app', :'db_name');
-  ELSE
-    EXECUTE format('ALTER DATABASE %I OWNER TO rails_app', :'db_name');
-  END IF;
-END $$;
+SELECT 'CREATE DATABASE ${DB_NAME} OWNER rails_app'
+WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${DB_NAME}')\gexec
 
--- Reduce default PUBLIC access at the database level
-REVOKE ALL ON DATABASE :"db_name" FROM PUBLIC;
-GRANT CONNECT ON DATABASE :"db_name" TO rails_app, superset;
+ALTER DATABASE ${DB_NAME} OWNER TO rails_app;
 
-\connect :"db_name"
+-- Reduce default PUBLIC access
+REVOKE ALL ON DATABASE ${DB_NAME} FROM PUBLIC;
+GRANT CONNECT ON DATABASE ${DB_NAME} TO rails_app, superset;
+SQL
 
--- Make rails_app the schema owner (Rails migrations usually operate in public)
+# Now connect to the app database for schema setup
+psql -v ON_ERROR_STOP=1 --username "postgres" --dbname "${DB_NAME}" <<SQL
+-- Make rails_app the schema owner
 ALTER SCHEMA public OWNER TO rails_app;
 
--- Rails app: read/write (and, as owner, can run migrations/DDL)
+-- Rails app: read/write
 GRANT USAGE ON SCHEMA public TO rails_app;
 
 -- Superset: read-only
@@ -57,14 +51,15 @@ GRANT USAGE ON SCHEMA public TO superset;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO superset;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO superset;
 
--- Ensure future tables/sequences created by rails_app are readable by superset
+-- Future tables/sequences created by rails_app are readable by superset
 ALTER DEFAULT PRIVILEGES FOR ROLE rails_app IN SCHEMA public
   GRANT SELECT ON TABLES TO superset;
 
 ALTER DEFAULT PRIVILEGES FOR ROLE rails_app IN SCHEMA public
   GRANT USAGE, SELECT ON SEQUENCES TO superset;
 
--- Optional guardrail: force read-only transactions for superset
+-- Force read-only transactions for superset
 ALTER ROLE superset SET default_transaction_read_only = on;
 SQL
 
+echo "Database '${DB_NAME}' initialized with rails_app (rw) and superset (ro) users."

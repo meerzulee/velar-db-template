@@ -20,6 +20,13 @@ services:
 
     restart: unless-stopped
 
+    healthcheck:
+      test: ["CMD-SHELL", "tailscale status --self --json | grep -q '\"BackendState\": \"Running\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
     networks:
       superset_net:
         aliases:
@@ -28,9 +35,9 @@ services:
   db:
     image: postgres:16
     container_name: v-db-${NAME}
-    hostname: v-db-${NAME}
     depends_on:
-      - ts
+      ts:
+        condition: service_healthy
 
     # Postgres shares the Tailscale sidecar network namespace
     network_mode: service:ts
@@ -75,10 +82,10 @@ networks:
 
 secrets:
   postgres_password:
-    file: ./secrets/${NAME}/postgres_password
+    file: ./secrets/postgres_password
   db_name:
-    file: ./secrets/${NAME}/db_name
+    file: ./secrets/db_name
   rails_app_password:
-    file: ./secrets/${NAME}/rails_app_password
+    file: ./secrets/rails_app_password
   superset_password:
-    file: ./secrets/${NAME}/superset_password
+    file: ./secrets/superset_password
