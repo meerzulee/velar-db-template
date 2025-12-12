@@ -1,0 +1,84 @@
+services:
+  ts:
+    image: tailscale/tailscale:stable
+    container_name: ts-v-db-${NAME}
+    hostname: ts-v-db-${NAME}
+
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "false"
+      TS_EXTRA_ARGS: "--login-server=${TS_LOGIN_SERVER} ${TS_EXTRA_ARGS:-}"
+
+    volumes:
+      - ts-state:/var/lib/tailscale
+
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+
+    restart: unless-stopped
+
+    networks:
+      superset_net:
+        aliases:
+          - v-db-${NAME}
+
+  db:
+    image: postgres:16
+    container_name: v-db-${NAME}
+    hostname: v-db-${NAME}
+    depends_on:
+      - ts
+
+    # Postgres shares the Tailscale sidecar network namespace
+    network_mode: service:ts
+
+    environment:
+      # "postgres" is the superuser (admin only); set its password via secret
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+
+      # Security defaults
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+
+    command: ["postgres", "-c", "listen_addresses=*"]
+
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+
+    secrets:
+      - postgres_password
+      - db_name
+      - rails_app_password
+      - superset_password
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+    stop_grace_period: 60s
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  ts-state:
+
+networks:
+  superset_net:
+    external: true
+    name: ${DOCKER_NETWORK}
+
+secrets:
+  postgres_password:
+    file: ./secrets/${NAME}/postgres_password
+  db_name:
+    file: ./secrets/${NAME}/db_name
+  rails_app_password:
+    file: ./secrets/${NAME}/rails_app_password
+  superset_password:
+    file: ./secrets/${NAME}/superset_password
